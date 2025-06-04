@@ -6,22 +6,23 @@ from dotenv import load_dotenv
 from serpapi import GoogleSearch
 load_dotenv()
 
-# Set up Bedrock client
+# Session + client setup
 session = boto3.Session(profile_name="imccarty")
 client = session.client("bedrock-runtime", region_name="us-west-2")
 model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
+# Set session flags
+st.session_state.setdefault("chat_history", [])
+st.session_state.setdefault("chat_messages", [])
+st.session_state.setdefault("last_query_was_product_search", False)
+st.session_state.setdefault("last_search_query", "")
+
 # Tool: Today's Date
 def get_today_date_tool():
-    st.write("### Using the tool `get_today_date`")
-    res = {"today": datetime.today().strftime("%Y-%m-%d")}
-    st.markdown("Tool Result")
-    st.markdown(res)
-    st.markdown("---")
-    return res
+    return {"today": datetime.today().strftime("%Y-%m-%d")}
 
-# Tool: Fashion-forward Search via SerpAPI
+# Tool: Google Shopping Product Search
 def search_tool(inputs):
     query = inputs.get("query", "")
     if not query:
@@ -53,52 +54,57 @@ def search_tool(inputs):
         "thumbnail": item.get("thumbnail")
     } for item in shopping_items[:3]]
 
-    # ⬇️ Clean visual output for the Streamlit UI
     if top_results:
         st.markdown("### 🛍️ Styled Picks Just for You")
         for product in top_results:
-            st.image(product["thumbnail"], width=200)
-            st.markdown(f"**[{product['title']}]({product['link']})**")
-            st.markdown(f"💰 {product['price']} &nbsp;&nbsp;|&nbsp;&nbsp; 🛍️ *{product['source']}*")
-            st.markdown("---")
+            st.markdown(f"""
+                <div style="display: flex; gap: 1em; align-items: center; margin-bottom: 1.2em; padding: 1em;
+                            border-radius: 12px; border: 1px solid #eee; background-color: #fff;">
+                    <img src="{product['thumbnail']}" width="120px" style="border-radius: 8px;" />
+                    <div>
+                        <a href="{product['link']}" target="_blank" style="text-decoration: none;">
+                            <h4 style="margin-bottom: 0.3em; color: #ec4899;">{product['title']}</h4>
+                        </a>
+                        <p style="margin: 0.2em 0;">💰 <b>{product['price']}</b></p>
+                        <p style="margin: 0.2em 0; color: gray;">🛍️ {product['source']}</p>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
     else:
         st.warning("No fashion picks found. Try rephrasing your vibe!")
 
+    # Store product search status
+    st.session_state.last_query_was_product_search = True
+    st.session_state.last_search_query = query
+
     return {"results": top_results}
 
-# Tool config specs
-datetime_tool_spec = {
-    "name": "get_today_date",
-    "description": "Returns today's date in YYYY-MM-DD format. Always use this to understand time. Use it before searching any current events.",
-    "inputSchema": {
-        "json": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    }
-}
-
-search_tool_spec = {
-    "name": "search_tool",
-    "description": "Uses SerpAPI to return current fashion-forward shopping results. Useful for outfit planning, styling, or trend-based recommendations.",
-    "inputSchema": {
-        "json": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"}
-            },
-            "required": ["query"]
-        }
-    }
-}
-
+# Tool config for Claude
 tool_config = {
-    "tools": [{"toolSpec": datetime_tool_spec}, {"toolSpec": search_tool_spec}],
+    "tools": [
+        {"toolSpec": {
+            "name": "get_today_date",
+            "description": "Returns today's date.",
+            "inputSchema": {"json": {"type": "object", "properties": {}, "required": []}}
+        }},
+        {"toolSpec": {
+            "name": "search_tool",
+            "description": "Fashion product search",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }
+            }
+        }}
+    ],
     "toolChoice": {"auto": {}}
 }
 
-# Tool routing function
+# Tool dispatcher
 def run_tool(name, inputs):
     if name == "get_today_date":
         return get_today_date_tool()
@@ -106,14 +112,22 @@ def run_tool(name, inputs):
         return search_tool(inputs)
     raise ValueError(f"Unknown tool: {name}")
 
-# Core function that sends prompt to Claude and handles tool calls
-def ask_bedrock(prompt):
+# Claude conversation manager
+def ask_bedrock(user_input):
     messages = [
         {
             "role": "user",
-            "content": [{"text": prompt}]
+            "content": [{
+                "text": (
+                    "You're a fashion assistant. When someone asks what to wear, first ask 2–3 follow-up questions "
+                    "to clarify the event type, style, weather, time of day, or budget. Only use search_tool after clarification. "
+                    "After recommending outfits, suggest next steps like accessories, outerwear, or shoes."
+                )}
+            ]
         }
-    ]
+    ] + st.session_state.chat_messages
+
+    messages.append({"role": "user", "content": [{"text": user_input}]})
 
     while True:
         res = client.converse(
@@ -125,12 +139,10 @@ def ask_bedrock(prompt):
         output_msg = res["output"]["message"]
         messages.append(output_msg)
 
-        # Check if Claude wants to use a tool
+        # Tool use
         tool_use = next((b["toolUse"] for b in output_msg["content"] if "toolUse" in b), None)
-
         if tool_use:
             result_data = run_tool(tool_use["name"], tool_use["input"])
-
             tool_result_msg = {
                 "role": "user",
                 "content": [{
@@ -144,16 +156,82 @@ def ask_bedrock(prompt):
             messages.append(tool_result_msg)
             continue
 
-        return messages
+        return messages[-1]
 
-# Streamlit UI
-st.title("👗 FitFinder AI — What Should I Wear?")
+# --- Streamlit UI ---
 
-user_input = st.text_area(
-    "Describe your event or vibe:",
-    placeholder="e.g. Rooftop dinner in red, or Coachella day look in pastels"
+st.set_page_config(page_title="FitFinder AI", page_icon="👗")
+st.markdown("""
+    <style>
+    /* Chat bubbles */
+    .stChatMessage.user {
+        background-color: #fef6f9;
+        border-left: 4px solid #ec4899;
+        padding: 0.8em 1em;
+        margin: 0.5em 0;
+        border-radius: 8px;
+    }
+    .stChatMessage.assistant {
+        background-color: #f0fdfa;
+        border-left: 4px solid #14b8a6;
+        padding: 0.8em 1em;
+        margin: 0.5em 0;
+        border-radius: 8px;
+    }
+    /* Button */
+    div.stButton > button {
+        background-color: #ec4899;
+        color: white;
+        font-weight: bold;
+        border-radius: 0.5rem;
+        border: none;
+        padding: 0.5em 1.2em;
+        margin-top: 1em;
+        transition: background-color 0.3s ease;
+    }
+    div.stButton > button:hover {
+        background-color: #db2777;
+    }
+    /* Header tweaks */
+    h1 {
+        color: #db2777;
+    }
+    </style>
+""", unsafe_allow_html=True)
+st.title("👗 FitFinder AI — Your Personal Outfit Stylist")
+
+user_input = st.chat_input(
+    "What's the vibe? Type your event, style, or color aesthetic ✨",
+    key="chatbox"
 )
 
-if st.button("Get Outfit Ideas"):
-    with st.spinner("Consulting fashion oracle..."):
-        _ = ask_bedrock(user_input)
+if user_input:
+    st.session_state.chat_history.append({"role": "user", "text": user_input})
+    reply = ask_bedrock(user_input)
+    for content in reply["content"]:
+        if "text" in content:
+            st.session_state.chat_history.append({"role": "assistant", "text": content["text"]})
+        elif "toolUse" in content:
+            st.session_state.chat_history.append({"role": "assistant", "text": "[Searching for stylish options...]"})
+    st.session_state.chat_messages = st.session_state.chat_messages + [reply]
+
+# Render chat history
+for msg in st.session_state.chat_history:
+    st.chat_message(msg["role"]).markdown(msg["text"])
+
+# Accessory follow-up
+if st.session_state.get("last_query_was_product_search", False):
+    if st.button("Show me accessories for this outfit"):
+        accessory_prompt = (
+            f"Now that you've shown outfit options for '{st.session_state.get('last_search_query', '')}', "
+            "can you suggest matching accessories like jewelry, bags, or shoes? Only show accessories, not clothes."
+        )
+        st.session_state.chat_history.append({"role": "user", "text": accessory_prompt})
+        reply = ask_bedrock(accessory_prompt)
+        for content in reply["content"]:
+            if "text" in content:
+                st.session_state.chat_history.append({"role": "assistant", "text": content["text"]})
+            elif "toolUse" in content:
+                st.session_state.chat_history.append({"role": "assistant", "text": "[Searching for accessories...]"})
+        st.session_state.chat_messages = st.session_state.chat_messages + [reply]
+        st.session_state.last_query_was_product_search = False
