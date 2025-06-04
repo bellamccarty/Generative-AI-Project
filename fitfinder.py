@@ -1,4 +1,5 @@
 import os
+import time
 import boto3
 import streamlit as st
 from datetime import datetime
@@ -6,23 +7,113 @@ from dotenv import load_dotenv
 from serpapi import GoogleSearch
 load_dotenv()
 
-# Session + client setup
+# AWS + SerpAPI setup
 session = boto3.Session(profile_name="imccarty")
 client = session.client("bedrock-runtime", region_name="us-west-2")
 model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 
-# Set session flags
+# Streamlit session state
 st.session_state.setdefault("chat_history", [])
 st.session_state.setdefault("chat_messages", [])
 st.session_state.setdefault("last_query_was_product_search", False)
 st.session_state.setdefault("last_search_query", "")
 
-# Tool: Today's Date
+# --- Page Config + Custom CSS ---
+st.set_page_config(page_title="FitFinder AI", page_icon="👗")
+
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600&family=Satisfy&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Quicksand', sans-serif;
+        background-color: #ffeaf5 !important;
+        color: #333;
+        color-scheme: light !important;
+    }
+
+    .handwritten {
+        font-family: 'Satisfy', cursive;
+    }
+
+    .stChatMessage {
+        background-color: white !important;
+        padding: 0.75rem 1rem !important;
+        border-radius: 1rem !important;
+        margin-bottom: 0.5rem !important;
+        border: 1px solid rgba(0,0,0,0.1) !important;
+        box-shadow: 2px 4px 10px rgba(0,0,0,0.04) !important;
+        animation: fadeInMessage 0.4s ease-in-out both;
+    }
+
+    .stChatMessage.st-chat-message-assistant {
+        background: linear-gradient(135deg, #f3e8ff, #ffe8f0) !important;
+    }
+
+    div[data-testid="chat-avatar"] {
+        border-radius: 50% !important;
+        padding: 6px !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .stChatMessage p {
+        color: #333 !important;
+        font-size: 16px !important;
+    }
+
+    div[data-testid="chat-message"] {
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    div.stButton > button {
+        background-color: #ec4899;
+        color: white;
+        font-weight: bold;
+        border-radius: 0.5rem;
+        border: none;
+        padding: 0.5em 1.2em;
+        margin-top: 1em;
+        transition: background-color 0.3s ease;
+    }
+
+    div.stButton > button:hover {
+        background-color: #db2777;
+    }
+
+    @keyframes fadeInMessage {
+        0% { opacity: 0; transform: translateY(6px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes fadeIn {
+        0% { opacity: 0; }
+        100% { opacity: 1; }
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- Splash Screen ---
+if "splash_shown" not in st.session_state:
+    with st.spinner("🪄 Getting your closet ready..."):
+        time.sleep(2.5)
+    st.session_state.splash_shown = True
+
+# --- Title Section ---
+st.markdown("""
+    <div style='text-align: center; animation: fadeIn 2s ease-in-out; margin-top: -1em;'>
+        <h1 class='handwritten' style='font-size: 3em; color: #b83b5e;'>What Should I Wear? 👗☁️🫧</h1>
+        <h4 style='color:#7a6e83; font-weight: normal;'>Let's build your look! ✨</h4>
+    </div>
+""", unsafe_allow_html=True)
+
+# --- Tool Logic ---
 def get_today_date_tool():
     return {"today": datetime.today().strftime("%Y-%m-%d")}
 
-# Tool: Google Shopping Product Search
 def search_tool(inputs):
     query = inputs.get("query", "")
     if not query:
@@ -46,7 +137,7 @@ def search_tool(inputs):
     results = search.get_dict()
     shopping_items = results.get("shopping_results", [])
 
-    top_results = [{
+    top_results = [ {
         "title": item.get("title"),
         "price": item.get("price"),
         "link": item.get("link") or item.get("product_link"),
@@ -57,29 +148,18 @@ def search_tool(inputs):
     if top_results:
         st.markdown("### 🛍️ Styled Picks Just for You")
         for product in top_results:
-            st.markdown(f"""
-                <div style="display: flex; gap: 1em; align-items: center; margin-bottom: 1.2em; padding: 1em;
-                            border-radius: 12px; border: 1px solid #eee; background-color: #fff;">
-                    <img src="{product['thumbnail']}" width="120px" style="border-radius: 8px;" />
-                    <div>
-                        <a href="{product['link']}" target="_blank" style="text-decoration: none;">
-                            <h4 style="margin-bottom: 0.3em; color: #ec4899;">{product['title']}</h4>
-                        </a>
-                        <p style="margin: 0.2em 0;">💰 <b>{product['price']}</b></p>
-                        <p style="margin: 0.2em 0; color: gray;">🛍️ {product['source']}</p>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
+            st.image(product["thumbnail"], width=200)
+            st.markdown(f"**[{product['title']}]({product['link']})**")
+            st.markdown(f"💰 {product['price']} &nbsp;&nbsp;|&nbsp;&nbsp; 🛍️ *{product['source']}*")
+            st.markdown("---")
     else:
         st.warning("No fashion picks found. Try rephrasing your vibe!")
 
-    # Store product search status
     st.session_state.last_query_was_product_search = True
     st.session_state.last_search_query = query
 
     return {"results": top_results}
 
-# Tool config for Claude
 tool_config = {
     "tools": [
         {"toolSpec": {
@@ -93,9 +173,7 @@ tool_config = {
             "inputSchema": {
                 "json": {
                     "type": "object",
-                    "properties": {
-                        "query": {"type": "string"}
-                    },
+                    "properties": {"query": {"type": "string"}},
                     "required": ["query"]
                 }
             }
@@ -104,7 +182,6 @@ tool_config = {
     "toolChoice": {"auto": {}}
 }
 
-# Tool dispatcher
 def run_tool(name, inputs):
     if name == "get_today_date":
         return get_today_date_tool()
@@ -112,12 +189,11 @@ def run_tool(name, inputs):
         return search_tool(inputs)
     raise ValueError(f"Unknown tool: {name}")
 
-# Claude conversation manager
 def ask_bedrock(user_input):
     messages = [
         {
             "role": "user",
-            "content": [{
+            "content": [ {
                 "text": (
                     "You're a fashion assistant. When someone asks what to wear, first ask 2–3 follow-up questions "
                     "to clarify the event type, style, weather, time of day, or budget. Only use search_tool after clarification. "
@@ -139,11 +215,10 @@ def ask_bedrock(user_input):
         output_msg = res["output"]["message"]
         messages.append(output_msg)
 
-        # Tool use
         tool_use = next((b["toolUse"] for b in output_msg["content"] if "toolUse" in b), None)
         if tool_use:
             result_data = run_tool(tool_use["name"], tool_use["input"])
-            tool_result_msg = {
+            messages.append({
                 "role": "user",
                 "content": [{
                     "toolResult": {
@@ -152,54 +227,12 @@ def ask_bedrock(user_input):
                         "status": "success"
                     }
                 }]
-            }
-            messages.append(tool_result_msg)
+            })
             continue
 
         return messages[-1]
 
-# --- Streamlit UI ---
-
-st.set_page_config(page_title="FitFinder AI", page_icon="👗")
-st.markdown("""
-    <style>
-    /* Chat bubbles */
-    .stChatMessage.user {
-        background-color: #fef6f9;
-        border-left: 4px solid #ec4899;
-        padding: 0.8em 1em;
-        margin: 0.5em 0;
-        border-radius: 8px;
-    }
-    .stChatMessage.assistant {
-        background-color: #f0fdfa;
-        border-left: 4px solid #14b8a6;
-        padding: 0.8em 1em;
-        margin: 0.5em 0;
-        border-radius: 8px;
-    }
-    /* Button */
-    div.stButton > button {
-        background-color: #ec4899;
-        color: white;
-        font-weight: bold;
-        border-radius: 0.5rem;
-        border: none;
-        padding: 0.5em 1.2em;
-        margin-top: 1em;
-        transition: background-color 0.3s ease;
-    }
-    div.stButton > button:hover {
-        background-color: #db2777;
-    }
-    /* Header tweaks */
-    h1 {
-        color: #db2777;
-    }
-    </style>
-""", unsafe_allow_html=True)
-st.title("👗 FitFinder AI — Your Personal Outfit Stylist")
-
+# --- Main UI ---
 user_input = st.chat_input(
     "What's the vibe? Type your event, style, or color aesthetic ✨",
     key="chatbox"
@@ -213,13 +246,12 @@ if user_input:
             st.session_state.chat_history.append({"role": "assistant", "text": content["text"]})
         elif "toolUse" in content:
             st.session_state.chat_history.append({"role": "assistant", "text": "[Searching for stylish options...]"})
-    st.session_state.chat_messages = st.session_state.chat_messages + [reply]
+    st.session_state.chat_messages.append(reply)
 
-# Render chat history
 for msg in st.session_state.chat_history:
     st.chat_message(msg["role"]).markdown(msg["text"])
 
-# Accessory follow-up
+# --- Accessory Follow-up Button ---
 if st.session_state.get("last_query_was_product_search", False):
     if st.button("Show me accessories for this outfit"):
         accessory_prompt = (
@@ -233,5 +265,13 @@ if st.session_state.get("last_query_was_product_search", False):
                 st.session_state.chat_history.append({"role": "assistant", "text": content["text"]})
             elif "toolUse" in content:
                 st.session_state.chat_history.append({"role": "assistant", "text": "[Searching for accessories...]"})
-        st.session_state.chat_messages = st.session_state.chat_messages + [reply]
+        st.session_state.chat_messages.append(reply)
         st.session_state.last_query_was_product_search = False
+
+# --- Footer ---
+st.markdown("""
+    <hr style="margin-top: 2em; margin-bottom: 1em; border: none; border-top: 1px solid #f4c2d7;" />
+    <div style="text-align: center; color: #b83b5e; font-size: 0.9em; font-family: 'Quicksand', sans-serif;">
+        Built by Sam and Bella 💖
+    </div>
+""", unsafe_allow_html=True)
