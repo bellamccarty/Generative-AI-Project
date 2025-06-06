@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 ```
 SERPAPI_API_KEY=your_serpapi_key_here
-AWS_PROFILE=imccarty  # or omit if your credentials are globally configured
+AWS_PROFILE=your_aws_profile  # or omit if your credentials are globally configured
 ```
 
 4. **Run the app**
